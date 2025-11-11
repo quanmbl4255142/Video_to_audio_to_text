@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chuyển Video thành Audio</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 1200px;
+            width: 100%;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+
+        @media (max-width: 968px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            text-align: center;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        input[type="url"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        input[type="url"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .progress-container {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s;
+            border-radius: 10px;
+        }
+
+        .status {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+
+        .result {
+            display: none;
+            margin-top: 20px;
+            padding: 20px;
+            background: #f0f9ff;
+            border-radius: 10px;
+            border: 2px solid #667eea;
+        }
+
+        .result.success {
+            background: #f0fdf4;
+            border-color: #22c55e;
+        }
+
+        .result.error {
+            background: #fef2f2;
+            border-color: #ef4444;
+        }
+
+        .result h3 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .download-btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background: #22c55e;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: all 0.3s;
+            margin-top: 10px;
+        }
+
+        .download-btn:hover {
+            background: #16a34a;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(34, 197, 94, 0.3);
+        }
+
+        .error-message {
+            color: #ef4444;
+            margin-top: 10px;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .url-list-container {
+            max-height: 600px;
+            overflow-y: auto;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 15px;
+        }
+
+        .url-list-header {
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .url-list-header h2 {
+            color: #333;
+            font-size: 20px;
+            margin-bottom: 10px;
+        }
+
+        .search-box {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .search-box:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .url-item {
+            padding: 12px;
+            margin-bottom: 8px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 2px solid transparent;
+        }
+
+        .url-item:hover {
+            background: #e9ecef;
+            border-color: #667eea;
+            transform: translateX(5px);
+        }
+
+        .url-item.active {
+            background: #e7f3ff;
+            border-color: #667eea;
+        }
+
+        .url-preview {
+            font-size: 12px;
+            color: #666;
+            word-break: break-all;
+            margin-top: 5px;
+        }
+
+        .url-id {
+            font-weight: 600;
+            color: #667eea;
+            margin-right: 8px;
+        }
+
+        .url-count {
+            color: #666;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div>
+            <h1>🎵 Chuyển Video thành Audio</h1>
+            <p class="subtitle">Nhập link video để tải về file audio MP3</p>
+            
+            <form id="convertForm">
+                <div class="form-group">
+                    <label for="videoUrl">URL Video:</label>
+                    <input 
+                        type="url" 
+                        id="videoUrl" 
+                        name="videoUrl" 
+                        placeholder="https://example.com/video.mp4" 
+                        required
+                    >
+                </div>
+                
+                <button type="submit" id="convertBtn">
+                    <span id="btnText">Chuyển đổi</span>
+                    <span id="btnSpinner" class="spinner" style="display: none;"></span>
+                </button>
+            </form>
+
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div class="status" id="statusText">Đang xử lý...</div>
+            </div>
+
+            <div class="result" id="result">
+                <h3 id="resultTitle"></h3>
+                <div id="resultContent"></div>
+            </div>
+        </div>
+
+        <div>
+            <div class="url-list-container">
+                <div class="url-list-header">
+                    <h2>📋 Danh sách Video từ CSV</h2>
+                    <input 
+                        type="text" 
+                        id="searchBox" 
+                        class="search-box" 
+                        placeholder="Tìm kiếm URL..."
+                    >
+                    <div class="url-count" id="urlCount">Đang tải...</div>
+                </div>
+                <div id="urlList"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('convertForm');
+        const convertBtn = document.getElementById('convertBtn');
+        const btnText = document.getElementById('btnText');
+        const btnSpinner = document.getElementById('btnSpinner');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
+        const statusText = document.getElementById('statusText');
+        const result = document.getElementById('result');
+        const resultTitle = document.getElementById('resultTitle');
+        const resultContent = document.getElementById('resultContent');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const videoUrl = document.getElementById('videoUrl').value.trim();
+            
+            if (!videoUrl) {
+                showError('Vui lòng nhập URL video');
+                return;
+            }
+
+            // Reset UI
+            result.style.display = 'none';
+            convertBtn.disabled = true;
+            btnText.textContent = 'Đang xử lý...';
+            btnSpinner.style.display = 'inline-block';
+            progressContainer.style.display = 'block';
+            progressFill.style.width = '0%';
+            statusText.textContent = 'Đang tải video...';
+
+            try {
+                const response = await fetch('/convert', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: videoUrl })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    progressFill.style.width = '100%';
+                    statusText.textContent = 'Đang chuyển audio thành văn bản...';
+                    
+                    // Hiển thị kết quả
+                    setTimeout(() => {
+                        showSuccess(data.text, data.download_url, data.filename, data.error);
+                        progressContainer.style.display = 'none';
+                    }, 500);
+                } else {
+                    showError(data.error || 'Có lỗi xảy ra');
+                    progressContainer.style.display = 'none';
+                }
+            } catch (error) {
+                showError('Lỗi kết nối: ' + error.message);
+                progressContainer.style.display = 'none';
+            } finally {
+                convertBtn.disabled = false;
+                btnText.textContent = 'Chuyển đổi';
+                btnSpinner.style.display = 'none';
+            }
+        });
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showSuccess(text, downloadUrl, filename, error) {
+            result.className = 'result success';
+            result.style.display = 'block';
+            
+            if (text) {
+                // Lưu text vào biến global
+                window.currentText = text;
+                
+                resultTitle.textContent = '📝 Văn bản từ audio:';
+                let downloadButton = '';
+                if (downloadUrl) {
+                    downloadButton = `<a href="${downloadUrl}" class="download-btn" download="${filename}" style="text-decoration: none; display: inline-block;">
+                        📥 Tải file audio
+                    </a>`;
+                }
+                
+                resultContent.innerHTML = `
+                    <div style="background: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; max-height: 400px; overflow-y: auto; border: 1px solid #e0e0e0;">
+                        <p style="color: #333; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(text)}</p>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <button onclick="copyTextToClipboard()" style="padding: 10px 20px; background: #667eea; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600;">
+                            📋 Sao chép văn bản
+                        </button>
+                        ${downloadButton}
+                    </div>
+                `;
+            } else {
+                resultTitle.textContent = '⚠️ Không thể chuyển thành văn bản';
+                resultContent.innerHTML = `
+                    <p class="error-message">${error || 'Không thể chuyển audio thành văn bản'}</p>
+                    <a href="${downloadUrl}" class="download-btn" download="${filename}">
+                        📥 Tải file audio
+                    </a>
+                `;
+            }
+        }
+
+        function copyTextToClipboard() {
+            if (window.currentText) {
+                navigator.clipboard.writeText(window.currentText).then(() => {
+                    alert('Đã sao chép văn bản vào clipboard!');
+                }).catch(err => {
+                    console.error('Lỗi khi sao chép:', err);
+                    // Fallback: tạo textarea và copy
+                    const textarea = document.createElement('textarea');
+                    textarea.value = window.currentText;
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(textarea);
+                    alert('Đã sao chép văn bản vào clipboard!');
+                });
+            }
+        }
+
+        function showError(message) {
+            result.className = 'result error';
+            result.style.display = 'block';
+            resultTitle.textContent = '❌ Lỗi';
+            resultContent.innerHTML = `<p class="error-message">${message}</p>`;
+        }
+
+        // Load URLs from CSV
+        let allUrls = [];
+        const urlList = document.getElementById('urlList');
+        const searchBox = document.getElementById('searchBox');
+        const urlCount = document.getElementById('urlCount');
+
+        async function loadUrls() {
+            try {
+                const response = await fetch('/api/urls');
+                const data = await response.json();
+                
+                if (data.urls) {
+                    allUrls = data.urls;
+                    displayUrls(allUrls);
+                    urlCount.textContent = `Tổng cộng: ${data.total} video`;
+                }
+            } catch (error) {
+                urlList.innerHTML = `<p style="color: #ef4444;">Lỗi khi tải danh sách: ${error.message}</p>`;
+            }
+        }
+
+        function displayUrls(urls) {
+            if (urls.length === 0) {
+                urlList.innerHTML = '<p style="color: #666; text-align: center;">Không tìm thấy URL nào</p>';
+                return;
+            }
+
+            urlList.innerHTML = urls.map(url => `
+                <div class="url-item" data-url="${url.url}">
+                    <div>
+                        <span class="url-id">#${url.id}</span>
+                        <span class="url-preview">${url.preview}</span>
+                    </div>
+                </div>
+            `).join('');
+
+            // Add click handlers
+            document.querySelectorAll('.url-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const url = item.getAttribute('data-url');
+                    document.getElementById('videoUrl').value = url;
+                    
+                    // Highlight selected item
+                    document.querySelectorAll('.url-item').forEach(i => i.classList.remove('active'));
+                    item.classList.add('active');
+                    
+                    // Auto submit form
+                    form.dispatchEvent(new Event('submit'));
+                });
+            });
+        }
+
+        // Search functionality
+        searchBox.addEventListener('input', (e) => {
+            const searchTerm = e.target.value.toLowerCase();
+            const filtered = allUrls.filter(url => 
+                url.url.toLowerCase().includes(searchTerm) || 
+                url.id.toString().includes(searchTerm)
+            );
+            displayUrls(filtered);
+            urlCount.textContent = `Hiển thị: ${filtered.length} / ${allUrls.length} video`;
+        });
+
+        // Load URLs on page load
+        loadUrls();
+    </script>
+</body>
+</html>
+
+
