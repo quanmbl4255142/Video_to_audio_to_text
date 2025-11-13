@@ -2,6 +2,7 @@ __pycache__/
 .venv/
 venv/
 whisper-finetuned/
+phowhisper-finetuned/
 *.mp4
 *.png
 *.csv
@@ -17,3 +18,39 @@ whisper-finetuned/
 *.pyc
 .pytest_cache/
 *.log
+
+# Model files - không commit model vào git
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.h5
+*.pb
+*.onnx
+*.tflite
+*.pkl
+*.joblib
+
+# Model directories
+models/
+checkpoints/
+*.pt/
+*.pth/
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# Audio files (có thể lớn)
+*.mp3
+*.wav
+*.flac
+*.aac
+*.ogg
+*.m4a
+*.wma

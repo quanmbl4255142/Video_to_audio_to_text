@@ -20,12 +20,46 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'temp'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max
 
+
+# Có thể chọn dùng checkpoint cụ thể hoặc model ở root
+# Option 1: Dùng model ở root (mặc định)
+# FINE_TUNED_MODEL_DIR = os.path.abspath(
+#     os.path.join(os.path.dirname(__file__), 'phowhisper-finetuned')
+# )
+
+# Option 2: Dùng checkpoint-93 (model tốt nhất - step 93)
+# Lưu ý: checkpoint thiếu tokenizer files, nên cần dùng tokenizer từ root
+FINE_TUNED_MODEL_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), 'phowhisper-finetuned', 'chunk_checkpoints','chunk_0009')
+)
+FINE_TUNED_TOKENIZER_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), 'phowhisper-finetuned')
+)
+PHOWHISPER_BASE_MODEL_ID = os.environ.get(
+    'PHOWHISPER_BASE_MODEL_ID', 'vinai/phowhisper-base'
+)
+
 # Tạo thư mục temp nếu chưa có
 os.makedirs('temp', exist_ok=True)
 
 # Cache cho PhoWhisper model (chỉ load 1 lần)
 _phowhisper_model = None
-_phowhisper_pipe = None
+_phowhisper_ft_pipe = None
+_phowhisper_base_pipe = None
+_spell_tool = None
+
+
+def parse_bool(value, default=False):
+    """Parse nhiều loại dữ liệu về bool."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 't', 'yes', 'y', 'on'}
+    return default
 
 def post_process_text(text):
     """Sửa lỗi thường gặp trong text đã transcribe"""
@@ -60,6 +94,32 @@ def post_process_text(text):
     text = text.strip()
     
     return text
+
+def correct_text_vi(text):
+    """Hiệu chỉnh chính tả/ngữ pháp tiếng Việt (LanguageTool)"""
+    global _spell_tool
+    if not text:
+        return text
+    try:
+        if _spell_tool is None:
+            import language_tool_python  # type: ignore
+            _spell_tool = language_tool_python.LanguageTool('vi')
+        matches = _spell_tool.check(text)
+        try:
+            from language_tool_python.utils import correct as lt_correct  # type: ignore
+            return lt_correct(text, matches)
+        except Exception:
+            corrected = text
+            for m in sorted(matches, key=lambda m: (m.offset + m.errorLength), reverse=True):
+                rep = (m.replacements[0] if m.replacements else None)
+                if rep is None:
+                    continue
+                start = m.offset
+                end = m.offset + m.errorLength
+                corrected = corrected[:start] + rep + corrected[end:]
+            return corrected
+    except Exception:
+        return text
 
 def setup_ffmpeg():
     """Thiết lập ffmpeg từ imageio_ffmpeg cho Whisper và pydub"""
@@ -106,10 +166,16 @@ def setup_ffmpeg():
         traceback.print_exc()
         return False
 
-def transcribe_audio(audio_path):
-    """Chuyển audio thành văn bản sử dụng Whisper hoặc SpeechRecognition"""
+def transcribe_audio(audio_path, model_type='finetuned'):
+    """Chuyển audio thành văn bản sử dụng Whisper hoặc SpeechRecognition
+    
+    Args:
+        audio_path: Đường dẫn đến file audio
+        model_type: Loại model ('base' hoặc 'finetuned'). Mặc định là 'finetuned'
+    """
     try:
         print(f"Đang chuyển audio thành văn bản: {audio_path}")
+        print(f"Sử dụng model: {model_type}")
         
         # Kiểm tra file audio có tồn tại không
         if not os.path.exists(audio_path):
@@ -120,12 +186,10 @@ def transcribe_audio(audio_path):
         print(f"Kích thước file audio: {file_size} bytes")
         
         # Phương pháp 1: Thử PhoWhisper (tối ưu cho tiếng Việt)
-        global _phowhisper_pipe
+        global _phowhisper_ft_pipe, _phowhisper_base_pipe
         try:
             from transformers import pipeline
             import torch
-            
-            print("Sử dụng PhoWhisper để chuyển đổi (tối ưu cho tiếng Việt)...")
             
             # Thiết lập ffmpeg cho transformers pipeline
             from imageio_ffmpeg import get_ffmpeg_exe
@@ -135,31 +199,71 @@ def transcribe_audio(audio_path):
             if ffmpeg_dir not in os_module.environ.get("PATH", ""):
                 os_module.environ["PATH"] = ffmpeg_dir + os.pathsep + os_module.environ.get("PATH", "")
             
-            # Sử dụng model đã cache hoặc load mới
-            if _phowhisper_pipe is None:
-                # Load PhoWhisper model từ Hugging Face
-                # Ưu tiên large model để có độ chính xác cao hơn
-                try:
-                    # Thử model large trước (chính xác hơn, đặc biệt với tên thương hiệu)
-                    print("Đang tải PhoWhisper-large model (chính xác hơn, lần đầu tiên có thể mất vài phút)...")
-                    _phowhisper_pipe = pipeline(
+            # Chọn model dựa trên model_type
+            use_finetuned = (model_type.lower() == 'finetuned' or model_type.lower() == 'fine-tuned')
+            
+            if use_finetuned:
+                print("Sử dụng PhoWhisper Fine-tuned để chuyển đổi (tối ưu cho tiếng Việt)...")
+                # Sử dụng model đã cache hoặc load mới (model đã fine-tune)
+                if _phowhisper_ft_pipe is None:
+                    # Chỉ cho phép dùng model fine-tuned local
+                    if not (os.path.isdir(FINE_TUNED_MODEL_DIR) and os.path.exists(
+                        os.path.join(FINE_TUNED_MODEL_DIR, "config.json")
+                    )):
+                        raise RuntimeError(
+                            f"Không tìm thấy model đã fine-tune tại: {FINE_TUNED_MODEL_DIR}. "
+                            f"Hãy train trước hoặc cập nhật FINE_TUNED_MODEL_DIR."
+                        )
+                    print(f"Đang tải PhoWhisper fine-tuned từ: {FINE_TUNED_MODEL_DIR}")
+                    
+                    # Kiểm tra xem checkpoint có đủ tokenizer và feature_extractor files không
+                    tokenizer_dir = FINE_TUNED_MODEL_DIR
+                    feature_extractor_dir = FINE_TUNED_MODEL_DIR
+                    
+                    tokenizer_config = os.path.join(FINE_TUNED_MODEL_DIR, "tokenizer_config.json")
+                    preprocessor_config = os.path.join(FINE_TUNED_MODEL_DIR, "preprocessor_config.json")
+                    
+                    if not os.path.exists(tokenizer_config) or not os.path.exists(preprocessor_config):
+                        # Nếu checkpoint thiếu tokenizer/feature_extractor, dùng từ root folder
+                        print(f"Checkpoint thiếu tokenizer/feature_extractor files, dùng từ root folder")
+                        tokenizer_dir = FINE_TUNED_TOKENIZER_DIR
+                        feature_extractor_dir = FINE_TUNED_TOKENIZER_DIR
+                    
+                    _phowhisper_ft_pipe = pipeline(
                         "automatic-speech-recognition",
-                        model="vinai/PhoWhisper-large",
-                        device=0 if torch.cuda.is_available() else -1,  # GPU nếu có, không thì CPU
-                    )
-                    print("Đã tải PhoWhisper-large model thành công")
-                except Exception as e:
-                    print(f"Không thể tải PhoWhisper-large, thử base: {e}")
-                    # Fallback sang base model (nhẹ hơn, nhanh hơn)
-                    print("Đang tải PhoWhisper-base model (lần đầu tiên có thể mất vài phút)...")
-                    _phowhisper_pipe = pipeline(
-                        "automatic-speech-recognition",
-                        model="vinai/PhoWhisper-base",
+                        model=FINE_TUNED_MODEL_DIR,
+                        tokenizer=tokenizer_dir,  # Chỉ định tokenizer riêng
+                        feature_extractor=feature_extractor_dir,  # Chỉ định feature_extractor riêng
                         device=0 if torch.cuda.is_available() else -1,
+                        # Xử lý audio dài: tự động chia nhỏ thành các đoạn <= 30s với overlap 5s
+                        chunk_length_s=30,
+                        stride_length_s=5,
+                        # Chỉ định ngôn ngữ tiếng Việt để cải thiện độ chính xác
+                        generate_kwargs={"language": "vi", "task": "transcribe"},
                     )
-                    print("Đã tải PhoWhisper-base model thành công")
+                    print("Đã tải PhoWhisper fine-tuned thành công")
+                else:
+                    print("Sử dụng PhoWhisper fine-tuned model đã cache (không cần tải lại)")
+                phowhisper_pipe = _phowhisper_ft_pipe
             else:
-                print("Sử dụng PhoWhisper model đã cache (không cần tải lại)")
+                print("Sử dụng PhoWhisper Base để chuyển đổi...")
+                # Sử dụng model base đã cache hoặc load mới
+                if _phowhisper_base_pipe is None:
+                    print(f"Đang tải PhoWhisper base từ: {PHOWHISPER_BASE_MODEL_ID}")
+                    _phowhisper_base_pipe = pipeline(
+                        "automatic-speech-recognition",
+                        model=PHOWHISPER_BASE_MODEL_ID,
+                        device=0 if torch.cuda.is_available() else -1,
+                        # Xử lý audio dài: tự động chia nhỏ thành các đoạn <= 30s với overlap 5s
+                        chunk_length_s=30,
+                        stride_length_s=5,
+                        # Chỉ định ngôn ngữ tiếng Việt để cải thiện độ chính xác
+                        generate_kwargs={"language": "vi", "task": "transcribe"},
+                    )
+                    print("Đã tải PhoWhisper base thành công")
+                else:
+                    print("Sử dụng PhoWhisper base model đã cache (không cần tải lại)")
+                phowhisper_pipe = _phowhisper_base_pipe
             
             # Chuyển đổi audio thành numpy array để tránh vấn đề ffmpeg trong pipeline
             print("Chuyển đổi và cải thiện chất lượng audio cho PhoWhisper...")
@@ -214,20 +318,33 @@ def transcribe_audio(audio_path):
                         audio = AudioSegment.from_wav(temp_wav_file)
                 
                 # Cải thiện chất lượng audio
-                # 1. Normalize volume (chuẩn hóa âm lượng)
-                audio = audio.normalize()
-                
-                # 2. Đảm bảo 16kHz, mono (đã convert ở trên nhưng kiểm tra lại)
+                # 1. Đảm bảo 16kHz, mono trước (quan trọng cho Whisper)
                 if audio.frame_rate != 16000:
                     audio = audio.set_frame_rate(16000)
                 if audio.channels != 1:
                     audio = audio.set_channels(1)
                 
-                # 3. Tăng volume nếu quá nhỏ (nhưng không quá lớn)
+                # 2. High-pass filter để loại bỏ noise tần số thấp
+                try:
+                    # Chỉ áp dụng nếu audio đủ dài
+                    if len(audio) > 100:  # > 100ms
+                        audio = audio.high_pass_filter(80)  # Loại bỏ < 80Hz
+                except:
+                    pass  # Bỏ qua nếu không hỗ trợ
+                
+                # 3. Normalize volume (chuẩn hóa âm lượng)
+                audio = audio.normalize()
+                
+                # 4. Tăng volume nếu quá nhỏ (nhưng không quá lớn)
                 if audio.max_possible_amplitude:
                     max_dBFS = audio.max_dBFS
                     if max_dBFS < -20:  # Nếu quá nhỏ
-                        audio = audio.apply_gain(-max_dBFS - 20)  # Tăng lên
+                        gain_needed = -max_dBFS - 20
+                        # Giới hạn gain tối đa để tránh distortion
+                        gain_needed = min(gain_needed, 15)  # Max 15dB
+                        audio = audio.apply_gain(gain_needed)
+                    elif max_dBFS > -3:  # Nếu quá lớn, giảm xuống
+                        audio = audio.apply_gain(-max_dBFS - 3)
                 
                 # Chuyển đổi thành numpy array (float32, -1.0 đến 1.0)
                 import numpy as np
@@ -242,7 +359,12 @@ def transcribe_audio(audio_path):
                 # Đưa numpy array vào pipeline (không cần ffmpeg)
                 # Pipeline sẽ tự động detect numpy array và sử dụng trực tiếp
                 print("Bắt đầu chuyển đổi audio thành văn bản...")
-                result = _phowhisper_pipe(samples, return_timestamps=False)
+                # Gọi pipeline với numpy array
+                # Nếu pipeline đã có generate_kwargs thì sẽ tự động dùng, không cần truyền lại
+                result = phowhisper_pipe(
+                    samples,
+                    return_timestamps=False
+                )
                 text = result["text"].strip()
                 
             except Exception as e:
@@ -252,7 +374,7 @@ def transcribe_audio(audio_path):
                 # Fallback: thử dùng file trực tiếp (có thể sẽ lỗi ffmpeg)
                 print("Thử dùng file audio trực tiếp...")
                 try:
-                    result = _phowhisper_pipe(audio_path, return_timestamps=False)
+                    result = phowhisper_pipe(audio_path, return_timestamps=False)
                     text = result["text"].strip()
                 except Exception as e2:
                     print(f"Fallback cũng lỗi: {e2}")
@@ -267,6 +389,8 @@ def transcribe_audio(audio_path):
             
             # Post-processing: Sửa lỗi thường gặp
             text = post_process_text(text)
+            # Sửa chính tả/ngữ pháp tiếng Việt
+            text = correct_text_vi(text)
             
             if text:
                 print(f"PhoWhisper: Đã chuyển đổi thành công ({len(text)} ký tự)")
@@ -275,141 +399,13 @@ def transcribe_audio(audio_path):
             else:
                 print("PhoWhisper: Không tìm thấy văn bản trong audio")
         except ImportError:
-            print("PhoWhisper chưa được cài đặt. Chạy: pip install transformers torch")
+            print("PhoWhisper/transformers chưa được cài đặt. Chạy: pip install transformers torch")
         except Exception as e:
-            print(f"PhoWhisper lỗi: {e}, thử Whisper...")
+            print(f"Lỗi PhoWhisper fine-tuned: {e}")
             import traceback
             traceback.print_exc()
-        
-        # Phương pháp 2: Thử Whisper (fallback)
-        try:
-            import whisper
-            print("Sử dụng Whisper để chuyển đổi...")
-            # Thiết lập ffmpeg cho Whisper
-            from imageio_ffmpeg import get_ffmpeg_exe
-            ffmpeg_exe = get_ffmpeg_exe()
-            
-            # Patch hàm load_audio của Whisper để sử dụng ffmpeg từ imageio_ffmpeg
-            import whisper.audio as whisper_audio
-            original_load_audio = whisper_audio.load_audio
-            
-            def patched_load_audio(file, sr=16000):
-                """Patch load_audio để sử dụng ffmpeg từ imageio_ffmpeg"""
-                import subprocess
-                cmd = [
-                    ffmpeg_exe,
-                    "-nostdin",
-                    "-threads", "0",
-                    "-i", file,
-                    "-f", "s16le",
-                    "-ac", "1",
-                    "-acodec", "pcm_s16le",
-                    "-ar", str(sr),
-                    "-"
-                ]
-                try:
-                    out = subprocess.run(cmd, capture_output=True, check=True, input=None).stdout
-                except subprocess.CalledProcessError as e:
-                    raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
-                except FileNotFoundError:
-                    raise RuntimeError(f"ffmpeg not found. Please install ffmpeg or use imageio_ffmpeg.")
-                
-                import numpy as np
-                return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
-            
-            # Thay thế hàm load_audio
-            whisper_audio.load_audio = patched_load_audio
-            
-            model = whisper.load_model("base")  # base, small, medium, large
-            print("Model Whisper đã tải xong, bắt đầu chuyển đổi...")
-            result = model.transcribe(audio_path, language="vi")  # Tiếng Việt
-            text = result["text"].strip()
-            if text:
-                # Post-processing: Sửa lỗi thường gặp
-                text = post_process_text(text)
-                print(f"Whisper: Đã chuyển đổi thành công ({len(text)} ký tự)")
-                print(f"Văn bản: {text[:100]}...")
-                return text
-            else:
-                print("Whisper: Không tìm thấy văn bản trong audio")
-        except ImportError:
-            print("Whisper chưa được cài đặt. Chạy: pip install openai-whisper")
-        except Exception as e:
-            print(f"Whisper lỗi: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Phương pháp 3: Sử dụng SpeechRecognition với Google Speech API
-        try:
-            print("Sử dụng SpeechRecognition với Google Speech API...")
-            # Chuyển đổi MP3 sang WAV nếu cần (Google Speech API yêu cầu WAV)
-            audio_file = audio_path
-            wav_path = None
-            
-            if audio_path.endswith('.mp3'):
-                wav_path = audio_path.replace('.mp3', '.wav')
-                print(f"Chuyển đổi MP3 sang WAV: {wav_path}")
-                try:
-                    # Thiết lập ffmpeg cho pydub
-                    setup_ffmpeg()
-                    audio = AudioSegment.from_mp3(audio_path)
-                    # Đảm bảo format phù hợp với Google Speech API
-                    audio = audio.set_frame_rate(16000).set_channels(1)  # Mono, 16kHz
-                    audio.export(wav_path, format="wav")
-                    audio_file = wav_path
-                    print(f"Đã chuyển đổi sang WAV thành công")
-                except Exception as e:
-                    print(f"Lỗi khi chuyển đổi MP3 sang WAV: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return None
-            
-            # Kiểm tra file WAV có tồn tại không
-            if not os.path.exists(audio_file):
-                print(f"File audio không tồn tại: {audio_file}")
-                return None
-            
-            r = sr.Recognizer()
-            print("Đang đọc file audio...")
-            with sr.AudioFile(audio_file) as source:
-                # Điều chỉnh cho tiếng ồn (thời gian ngắn hơn để nhanh hơn)
-                print("Điều chỉnh cho tiếng ồn...")
-                r.adjust_for_ambient_noise(source, duration=0.5)
-                print("Đang ghi âm...")
-                audio_data = r.record(source)
-                print(f"Đã ghi âm: {len(audio_data.raw_data)} bytes")
-            
-            # Thử nhận diện với Google Speech API (miễn phí)
-            print("Đang gửi đến Google Speech API...")
-            try:
-                text = r.recognize_google(audio_data, language="vi-VN")
-                # Post-processing: Sửa lỗi thường gặp
-                text = post_process_text(text)
-                print(f"Google Speech API: Đã chuyển đổi thành công ({len(text)} ký tự)")
-                print(f"Văn bản: {text[:100]}...")
-                # Xóa file WAV tạm nếu có
-                if wav_path and os.path.exists(wav_path):
-                    safe_delete_file(wav_path)
-                return text
-            except sr.UnknownValueError:
-                print("Google Speech API không thể nhận diện audio. Có thể audio không có lời nói hoặc chất lượng kém.")
-            except sr.RequestError as e:
-                print(f"Lỗi khi gọi Google Speech API: {e}")
-                print("Có thể cần kết nối internet hoặc API đang bị giới hạn")
-            
-            # Xóa file WAV tạm nếu có
-            if wav_path and os.path.exists(wav_path):
-                safe_delete_file(wav_path)
-                
-        except ImportError:
-            print("SpeechRecognition chưa được cài đặt. Chạy: pip install SpeechRecognition pydub")
-        except Exception as e:
-            print(f"SpeechRecognition lỗi: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        print("Tất cả các phương pháp đều thất bại")
-        return None
+            # Không fallback sang model khác theo yêu cầu
+            return None
         
     except Exception as e:
         print(f"Lỗi khi chuyển audio thành văn bản: {e}")
@@ -456,7 +452,7 @@ def resolve_url(url):
         }
         # Sử dụng GET với stream=False để follow redirects và lấy URL cuối cùng
         session = requests.Session()
-        response = session.get(url, headers=headers, timeout=30, allow_redirects=True, stream=False)
+        response = session.get(url, headers=headers, timeout=300, allow_redirects=True, stream=False)
         final_url = response.url
         print(f"URL gốc: {url[:100]}...")
         print(f"URL thực tế: {final_url[:100]}...")
@@ -769,61 +765,205 @@ def convert_video():
         safe_delete_file(video_filename)
         
         # Chuyển audio thành văn bản
+        model_type = data.get('model_type', 'finetuned')  # Mặc định là finetuned
         statusText = "Đang chuyển audio thành văn bản..."
-        text = transcribe_audio(audio_filename)
         
-        if text:
+        # Xử lý khi chọn cả 2 model
+        if model_type == 'both':
+            print("Chạy cả 2 model song song...")
+            # Chạy cả 2 model song song
+            def run_model(m_type):
+                try:
+                    return transcribe_audio(audio_filename, model_type=m_type)
+                except Exception as e:
+                    print(f"Lỗi khi chạy model {m_type}: {e}")
+                    return None
+            
+            # Chạy song song bằng threading
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_ft = executor.submit(run_model, 'finetuned')
+                future_base = executor.submit(run_model, 'base')
+                
+                text_ft = future_ft.result()
+                text_base = future_base.result()
+            
             # Xóa file audio sau khi đã lấy được văn bản
             time.sleep(0.5)
             gc.collect()
             safe_delete_file(audio_filename)
             print(f"Đã xóa file audio sau khi lấy được văn bản: {audio_filename}")
             
-            # Trả về văn bản (không có download_url vì đã xóa file)
+            # Trả về cả 2 kết quả
             return jsonify({
                 'success': True,
-                'text': text,
+                'both_models': True,
+                'text_finetuned': text_ft,
+                'text_base': text_base,
                 'download_url': None,
                 'filename': None
             })
         else:
-            # Kiểm tra xem có thư viện cần thiết không
-            missing_libs = []
-            try:
-                from transformers import pipeline
-                import torch
-            except ImportError:
-                missing_libs.append('transformers torch')
+            # Chạy 1 model như bình thường
+            text = transcribe_audio(audio_filename, model_type=model_type)
             
-            try:
-                import whisper
-            except ImportError:
-                missing_libs.append('openai-whisper')
-            
-            try:
-                import speech_recognition
-            except ImportError:
-                missing_libs.append('SpeechRecognition')
-            
-            try:
-                from pydub import AudioSegment
-            except ImportError:
-                missing_libs.append('pydub')
-            
-            error_msg = 'Không thể chuyển audio thành văn bản.'
-            if missing_libs:
-                error_msg += f' Cần cài đặt: pip install {" ".join(missing_libs)}'
+            if text:
+                # Xóa file audio sau khi đã lấy được văn bản
+                time.sleep(0.5)
+                gc.collect()
+                safe_delete_file(audio_filename)
+                print(f"Đã xóa file audio sau khi lấy được văn bản: {audio_filename}")
+                
+                # Trả về văn bản (không có download_url vì đã xóa file)
+                return jsonify({
+                    'success': True,
+                    'both_models': False,
+                    'text': text,
+                    'download_url': None,
+                    'filename': None
+                })
             else:
-                error_msg += ' Có thể audio không có lời nói, chất lượng audio kém, hoặc cần kết nối internet (cho Google Speech API).'
+                # Kiểm tra xem có thư viện cần thiết không
+                missing_libs = []
+                try:
+                    from transformers import pipeline
+                    import torch
+                except ImportError:
+                    missing_libs.append('transformers torch')
+                
+                try:
+                    import whisper
+                except ImportError:
+                    missing_libs.append('openai-whisper')
+                
+                try:
+                    import speech_recognition
+                except ImportError:
+                    missing_libs.append('SpeechRecognition')
+                
+                try:
+                    from pydub import AudioSegment
+                except ImportError:
+                    missing_libs.append('pydub')
+                
+                error_msg = 'Không thể chuyển audio thành văn bản.'
+                if missing_libs:
+                    error_msg += f' Cần cài đặt: pip install {" ".join(missing_libs)}'
+                else:
+                    error_msg += ' Có thể audio không có lời nói, chất lượng audio kém, hoặc cần kết nối internet (cho Google Speech API).'
+                
+                # Nếu không chuyển được thành text, giữ lại file audio để người dùng có thể tải về
+                return jsonify({
+                    'success': True,
+                    'both_models': False,
+                    'text': None,
+                    'error': error_msg,
+                    'download_url': f'/download/{request_id}',
+                    'filename': f'audio_{request_id}.mp3'
+                })
+        
+    except Exception as e:
+        return jsonify({'error': f'Lỗi: {str(e)}'}), 500
+
+@app.route('/convert_file', methods=['POST'])
+def convert_video_file():
+    """API endpoint để chuyển đổi video (upload file) thành audio"""
+    try:
+        # Kiểm tra có file không
+        if 'file' not in request.files:
+            return jsonify({'error': 'Vui lòng upload file video với field name "file"'}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'File rỗng'}), 400
+        
+        # Lưu file tạm
+        request_id = str(uuid.uuid4())
+        filename = secure_filename(file.filename)
+        video_ext = os.path.splitext(filename)[1].lower() or '.mp4'
+        video_filename = os.path.join(app.config['UPLOAD_FOLDER'], f'video_{request_id}{video_ext}')
+        audio_filename = os.path.join(app.config['UPLOAD_FOLDER'], f'audio_{request_id}.mp3')
+        file.save(video_filename)
+        
+        # Kiểm tra kích thước
+        if not os.path.exists(video_filename) or os.path.getsize(video_filename) == 0:
+            safe_delete_file(video_filename)
+            return jsonify({'error': 'File video upload không hợp lệ hoặc rỗng'}), 400
+        
+        # Trích xuất audio
+        extract_result = extract_audio(video_filename, audio_filename)
+        if not extract_result:
+            # Xóa video tạm
+            safe_delete_file(video_filename)
+            return jsonify({'error': 'Không thể trích xuất audio từ file video. Vui lòng thử file khác.'}), 500
+        
+        # Xóa video tạm sau khi trích xuất
+        time.sleep(0.5)
+        gc.collect()
+        safe_delete_file(video_filename)
+        
+        # Chuyển audio thành văn bản
+        model_type = request.form.get('model_type', 'finetuned')  # Mặc định là finetuned
+        
+        # Xử lý khi chọn cả 2 model
+        if model_type == 'both':
+            print("Chạy cả 2 model song song...")
+            # Chạy cả 2 model song song
+            def run_model(m_type):
+                try:
+                    return transcribe_audio(audio_filename, model_type=m_type)
+                except Exception as e:
+                    print(f"Lỗi khi chạy model {m_type}: {e}")
+                    return None
             
-            # Nếu không chuyển được thành text, giữ lại file audio để người dùng có thể tải về
+            # Chạy song song bằng threading
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_ft = executor.submit(run_model, 'finetuned')
+                future_base = executor.submit(run_model, 'base')
+                
+                text_ft = future_ft.result()
+                text_base = future_base.result()
+            
+            # Xóa audio tạm
+            time.sleep(0.5)
+            gc.collect()
+            safe_delete_file(audio_filename)
+            
             return jsonify({
                 'success': True,
-                'text': None,
-                'error': error_msg,
-                'download_url': f'/download/{request_id}',
-                'filename': f'audio_{request_id}.mp3'
+                'both_models': True,
+                'text_finetuned': text_ft,
+                'text_base': text_base,
+                'download_url': None,
+                'filename': None
             })
+        else:
+            # Chạy 1 model như bình thường
+            text = transcribe_audio(audio_filename, model_type=model_type)
+            
+            if text:
+                # Xóa audio tạm
+                time.sleep(0.5)
+                gc.collect()
+                safe_delete_file(audio_filename)
+                
+                return jsonify({
+                    'success': True,
+                    'both_models': False,
+                    'text': text,
+                    'download_url': None,
+                    'filename': None
+                })
+            else:
+                # Giữ lại audio để tải nếu cần phân tích thêm
+                return jsonify({
+                    'success': True,
+                    'both_models': False,
+                    'text': None,
+                    'error': 'Không thể chuyển audio thành văn bản. Có thể audio không có lời nói hoặc chất lượng kém.',
+                    'download_url': f'/download/{request_id}',
+                    'filename': f'audio_{request_id}.mp3'
+                })
         
     except Exception as e:
         return jsonify({'error': f'Lỗi: {str(e)}'}), 500
@@ -858,5 +998,5 @@ def cleanup(request_id):
     return jsonify({'success': True})
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5001)
 

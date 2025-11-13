@@ -80,6 +80,23 @@
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
 
+        select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 14px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
         button {
             width: 100%;
             padding: 14px;
@@ -271,13 +288,19 @@
             font-size: 12px;
             margin-top: 5px;
         }
+
+        @media (max-width: 768px) {
+            .result-content-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div>
             <h1>🎵 Chuyển Video thành Audio</h1>
-            <p class="subtitle">Nhập link video để tải về file audio MP3</p>
+            <p class="subtitle">Nhập link video hoặc tải lên file để chuyển thành văn bản</p>
             
             <form id="convertForm">
                 <div class="form-group">
@@ -291,9 +314,55 @@
                     >
                 </div>
                 
+                <div class="form-group">
+                    <label for="modelType">Chọn Model:</label>
+                    <select 
+                        id="modelType" 
+                        name="modelType"
+                        style="width: 100%; padding: 12px 15px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 14px; background: white; cursor: pointer; transition: all 0.3s;"
+                    >
+                        <option value="finetuned">PhoWhisper Fine-tuned (Tối ưu cho tiếng Việt)</option>
+                        <option value="base">PhoWhisper Base (Model gốc)</option>
+                        <option value="both">Cả 2 model (So sánh kết quả)</option>
+                    </select>
+                </div>
+                
                 <button type="submit" id="convertBtn">
                     <span id="btnText">Chuyển đổi</span>
                     <span id="btnSpinner" class="spinner" style="display: none;"></span>
+                </button>
+            </form>
+
+            <div style="margin: 20px 0; text-align: center; color: #999;">— hoặc —</div>
+
+            <form id="uploadForm">
+                <div class="form-group">
+                    <label for="videoFile">Tải lên file video:</label>
+                    <input 
+                        type="file" 
+                        id="videoFile" 
+                        name="file" 
+                        accept="video/*"
+                        style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 10px;"
+                    >
+                </div>
+                
+                <div class="form-group">
+                    <label for="modelTypeUpload">Chọn Model:</label>
+                    <select 
+                        id="modelTypeUpload" 
+                        name="modelType"
+                        style="width: 100%; padding: 12px 15px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 14px; background: white; cursor: pointer; transition: all 0.3s;"
+                    >
+                        <option value="finetuned">PhoWhisper Fine-tuned (Tối ưu cho tiếng Việt)</option>
+                        <option value="base">PhoWhisper Base (Model gốc)</option>
+                        <option value="both">Cả 2 model (So sánh kết quả)</option>
+                    </select>
+                </div>
+                
+                <button type="submit" id="uploadBtn">
+                    <span id="uploadBtnText">Tải lên và chuyển đổi</span>
+                    <span id="uploadBtnSpinner" class="spinner" style="display: none;"></span>
                 </button>
             </form>
 
@@ -338,11 +407,16 @@
         const result = document.getElementById('result');
         const resultTitle = document.getElementById('resultTitle');
         const resultContent = document.getElementById('resultContent');
+        const uploadForm = document.getElementById('uploadForm');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const uploadBtnText = document.getElementById('uploadBtnText');
+        const uploadBtnSpinner = document.getElementById('uploadBtnSpinner');
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             
             const videoUrl = document.getElementById('videoUrl').value.trim();
+            const modelType = document.getElementById('modelType').value;
             
             if (!videoUrl) {
                 showError('Vui lòng nhập URL video');
@@ -364,7 +438,7 @@
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ url: videoUrl })
+                    body: JSON.stringify({ url: videoUrl, model_type: modelType })
                 });
 
                 const data = await response.json();
@@ -375,7 +449,11 @@
                     
                     // Hiển thị kết quả
                     setTimeout(() => {
-                        showSuccess(data.text, data.download_url, data.filename, data.error);
+                        if (data.both_models) {
+                            showSuccess(null, data.download_url, data.filename, data.error, true, data.text_finetuned, data.text_base);
+                        } else {
+                            showSuccess(data.text, data.download_url, data.filename, data.error, false);
+                        }
                         progressContainer.style.display = 'none';
                     }, 500);
                 } else {
@@ -398,11 +476,50 @@
             return div.innerHTML;
         }
 
-        function showSuccess(text, downloadUrl, filename, error) {
+        function showSuccess(text, downloadUrl, filename, error, bothModels, textFinetuned, textBase) {
             result.className = 'result success';
             result.style.display = 'block';
             
-            if (text) {
+            if (bothModels) {
+                // Hiển thị cả 2 kết quả song song
+                resultTitle.textContent = '📝 Kết quả từ cả 2 model:';
+                
+                const ftText = textFinetuned || 'Không có kết quả';
+                const baseText = textBase || 'Không có kết quả';
+                
+                // Lưu cả 2 text vào biến global
+                window.currentTextFinetuned = textFinetuned;
+                window.currentTextBase = textBase;
+                
+                resultContent.innerHTML = `
+                    <div class="result-content-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 15px;">
+                        <div style="background: white; padding: 15px; border-radius: 8px; border: 2px solid #667eea;">
+                            <h4 style="margin: 0 0 10px 0; color: #667eea; font-size: 16px;">🎯 PhoWhisper Fine-tuned</h4>
+                            <div style="max-height: 400px; overflow-y: auto; margin-bottom: 10px;">
+                                <p style="color: #333; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; font-size: 14px;">${escapeHtml(ftText)}</p>
+                            </div>
+                            <button onclick="copyTextToClipboard('finetuned')" style="width: 100%; padding: 8px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px;">
+                                📋 Sao chép
+                            </button>
+                        </div>
+                        <div style="background: white; padding: 15px; border-radius: 8px; border: 2px solid #764ba2;">
+                            <h4 style="margin: 0 0 10px 0; color: #764ba2; font-size: 16px;">🔷 PhoWhisper Base</h4>
+                            <div style="max-height: 400px; overflow-y: auto; margin-bottom: 10px;">
+                                <p style="color: #333; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; font-size: 14px;">${escapeHtml(baseText)}</p>
+                            </div>
+                            <button onclick="copyTextToClipboard('base')" style="width: 100%; padding: 8px; background: #764ba2; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px;">
+                                📋 Sao chép
+                            </button>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center;">
+                        <button onclick="copyTextToClipboard('both')" style="padding: 10px 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600;">
+                            📋 Sao chép cả 2
+                        </button>
+                    </div>
+                `;
+            } else if (text) {
+                // Hiển thị 1 kết quả như bình thường
                 // Lưu text vào biến global
                 window.currentText = text;
                 
@@ -436,15 +553,27 @@
             }
         }
 
-        function copyTextToClipboard() {
-            if (window.currentText) {
-                navigator.clipboard.writeText(window.currentText).then(() => {
+        function copyTextToClipboard(modelType) {
+            let textToCopy = '';
+            
+            if (modelType === 'finetuned' && window.currentTextFinetuned) {
+                textToCopy = window.currentTextFinetuned;
+            } else if (modelType === 'base' && window.currentTextBase) {
+                textToCopy = window.currentTextBase;
+            } else if (modelType === 'both' && window.currentTextFinetuned && window.currentTextBase) {
+                textToCopy = `=== PhoWhisper Fine-tuned ===\n${window.currentTextFinetuned}\n\n=== PhoWhisper Base ===\n${window.currentTextBase}`;
+            } else if (window.currentText) {
+                textToCopy = window.currentText;
+            }
+            
+            if (textToCopy) {
+                navigator.clipboard.writeText(textToCopy).then(() => {
                     alert('Đã sao chép văn bản vào clipboard!');
                 }).catch(err => {
                     console.error('Lỗi khi sao chép:', err);
                     // Fallback: tạo textarea và copy
                     const textarea = document.createElement('textarea');
-                    textarea.value = window.currentText;
+                    textarea.value = textToCopy;
                     document.body.appendChild(textarea);
                     textarea.select();
                     document.execCommand('copy');
@@ -460,6 +589,64 @@
             resultTitle.textContent = '❌ Lỗi';
             resultContent.innerHTML = `<p class="error-message">${message}</p>`;
         }
+
+        // Handle upload form
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fileInput = document.getElementById('videoFile');
+            const file = fileInput.files[0];
+            const modelType = document.getElementById('modelTypeUpload').value;
+            
+            if (!file) {
+                showError('Vui lòng chọn file video để tải lên');
+                return;
+            }
+
+            // Reset UI
+            result.style.display = 'none';
+            uploadBtn.disabled = true;
+            uploadBtnText.textContent = 'Đang tải và xử lý...';
+            uploadBtnSpinner.style.display = 'inline-block';
+            progressContainer.style.display = 'block';
+            progressFill.style.width = '0%';
+            statusText.textContent = 'Đang tải file...';
+
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('model_type', modelType);
+
+                const response = await fetch('/convert_file', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    progressFill.style.width = '100%';
+                    statusText.textContent = 'Đang chuyển audio thành văn bản...';
+                    setTimeout(() => {
+                        if (data.both_models) {
+                            showSuccess(null, data.download_url, data.filename, data.error, true, data.text_finetuned, data.text_base);
+                        } else {
+                            showSuccess(data.text, data.download_url, data.filename, data.error, false);
+                        }
+                        progressContainer.style.display = 'none';
+                    }, 500);
+                } else {
+                    showError(data.error || 'Có lỗi xảy ra khi xử lý file');
+                    progressContainer.style.display = 'none';
+                }
+            } catch (error) {
+                showError('Lỗi kết nối: ' + error.message);
+                progressContainer.style.display = 'none';
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtnText.textContent = 'Tải lên và chuyển đổi';
+                uploadBtnSpinner.style.display = 'none';
+            }
+        });
 
         // Load URLs from CSV
         let allUrls = [];
