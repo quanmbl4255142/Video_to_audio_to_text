@@ -30,13 +30,13 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max
 # Option 2: Dùng checkpoint-93 (model tốt nhất - step 93)
 # Lưu ý: checkpoint thiếu tokenizer files, nên cần dùng tokenizer từ root
 FINE_TUNED_MODEL_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), 'phowhisper-finetuned', 'chunk_checkpoints','chunk_0009')
+    os.path.join(os.path.dirname(__file__), 'phowhisper-finetuned')
 )
 FINE_TUNED_TOKENIZER_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), 'phowhisper-finetuned')
 )
 PHOWHISPER_BASE_MODEL_ID = os.environ.get(
-    'PHOWHISPER_BASE_MODEL_ID', 'vinai/phowhisper-base'
+    'PHOWHISPER_BASE_MODEL_ID', 'vinai/phowhisper-large'
 )
 
 # Tạo thư mục temp nếu chưa có
@@ -62,28 +62,67 @@ def parse_bool(value, default=False):
     return default
 
 def post_process_text(text):
-    """Sửa lỗi thường gặp trong text đã transcribe"""
+    """Sửa lỗi thường gặp trong text đã transcribe - mở rộng cho TVC"""
     if not text:
         return text
     
-    # Dictionary để sửa lỗi thường gặp
+    # Dictionary để sửa lỗi thường gặp - mở rộng cho TVC
     corrections = {
-        # Tên thương hiệu
-        r'\bHADEN SHOW\s*ĐỂS?\b': 'Head & Shoulders',
+        # Tên thương hiệu phổ biến
         r'\bHADEN\s*SHOW\s*ĐỂS?\b': 'Head & Shoulders',
         r'\bHADEN\s*SHOW\s*ĐỂ\b': 'Head & Shoulders',
         r'\bHADEN\s*SHOW\s*ĐỂ\s*S\b': 'Head & Shoulders',
         r'\bHADEN\s*SHOW\s*ĐỂ\s*S\s*Mỳ\b': 'Head & Shoulders. Mỳ',
         r'\bHADEN\s*SHOWder\b': 'Head & Shoulders',
         r'\bHADEN\s*SHOWer\b': 'Head & Shoulders',
+        r'\bHED\s*SHOULDERS?\b': 'Head & Shoulders',
+        r'\bHED\s*AND\s*SHOULDERS?\b': 'Head & Shoulders',
+        
+        # Lỗi phát âm thường gặp
         r'\bPUT\s*CHO\s*CÊ\b': 'Cô cho con',
         r'\bCHO\s*CÊ\b': 'cho con',
         r'\bCÊ\b': 'con',
+        r'\bCÔ\s*CHO\s*CÊ\b': 'Cô cho con',
+        r'\bCHO\s*CÔ\s*CÊ\b': 'cho con',
+        
+        # Từ thường bị nhầm trong TVC
+        r'\bSẢN\s*PHẨM\b': 'sản phẩm',
+        r'\bTHƯƠNG\s*HIỆU\b': 'thương hiệu',
+        r'\bCHẤT\s*LƯỢNG\b': 'chất lượng',
+        r'\bCAM\s*KẾT\b': 'cam kết',
+        r'\bĐẢM\s*BẢO\b': 'đảm bảo',
+        r'\bHIỆU\s*QUẢ\b': 'hiệu quả',
+        r'\bTỐI\s*ƯU\b': 'tối ưu',
+        r'\bVƯỢT\s*TRỘI\b': 'vượt trội',
+        r'\bƯU\s*ĐÃI\b': 'ưu đãi',
+        r'\bKHUYẾN\s*MÃI\b': 'khuyến mãi',
+        
+        # Sửa lỗi từ ghép
+        r'\bKHÔNG\s+CÓ\b': 'không có',
+        r'\bKHÔNG\s+THỂ\b': 'không thể',
+        r'\bCÓ\s+THỂ\b': 'có thể',
+        r'\bĐƯỢC\s+RỒI\b': 'được rồi',
+        r'\bNHƯ\s+VẬY\b': 'như vậy',
+        r'\bVÌ\s+VẬY\b': 'vì vậy',
+        r'\bCHO\s+NÊN\b': 'cho nên',
+        r'\bNHƯ\s+THẾ\b': 'như thế',
+        
+        # Sửa lỗi phát âm số
+        r'\bMỘT\s*TRĂM\b': 'một trăm',
+        r'\bHAI\s*TRĂM\b': 'hai trăm',
+        r'\bBA\s*TRĂM\b': 'ba trăm',
+        r'\bBỐN\s*TRĂM\b': 'bốn trăm',
+        r'\bNĂM\s*TRĂM\b': 'năm trăm',
+        
         # Sửa dấu câu
         r'\s+([,\.!?;:])': r'\1',  # Bỏ space trước dấu câu
         r'([,\.!?;:])\s*([A-ZĐ])': r'\1 \2',  # Thêm space sau dấu câu
-        # Sửa lỗi thường gặp
+        
+        # Sửa lỗi thường gặp cụ thể
         r'\bkhông\s+có\s+gầu\s+vì\s+luôn\s+có\b': 'không có gầu vì luôn có Head & Shoulders',
+        r'\bgầu\s+đầu\b': 'gầu đầu',
+        r'\bgàu\s+đầu\b': 'gầu đầu',
+        r'\bgầu\s+tóc\b': 'gầu tóc',
     }
     
     for pattern, replacement in corrections.items():
@@ -171,7 +210,7 @@ def transcribe_audio(audio_path, model_type='finetuned'):
     
     Args:
         audio_path: Đường dẫn đến file audio
-        model_type: Loại model ('base' hoặc 'finetuned'). Mặc định là 'finetuned'
+        model_type: Loại model ('large' hoặc 'finetuned'). Mặc định là 'finetuned'
     """
     try:
         print(f"Đang chuyển audio thành văn bản: {audio_path}")
@@ -200,7 +239,9 @@ def transcribe_audio(audio_path, model_type='finetuned'):
                 os_module.environ["PATH"] = ffmpeg_dir + os.pathsep + os_module.environ.get("PATH", "")
             
             # Chọn model dựa trên model_type
+            # Hỗ trợ cả 'base' (tương thích ngược) và 'large' (mới) - cả 2 đều dùng model large
             use_finetuned = (model_type.lower() == 'finetuned' or model_type.lower() == 'fine-tuned')
+            use_large = (model_type.lower() == 'large' or model_type.lower() == 'base')
             
             if use_finetuned:
                 print("Sử dụng PhoWhisper Fine-tuned để chuyển đổi (tối ưu cho tiếng Việt)...")
@@ -238,18 +279,22 @@ def transcribe_audio(audio_path, model_type='finetuned'):
                         # Xử lý audio dài: tự động chia nhỏ thành các đoạn <= 30s với overlap 5s
                         chunk_length_s=30,
                         stride_length_s=5,
-                        # Chỉ định ngôn ngữ tiếng Việt để cải thiện độ chính xác
-                        generate_kwargs={"language": "vi", "task": "transcribe"},
+                        # Chỉ định ngôn ngữ tiếng Việt và điều chỉnh parameters để tăng độ chính xác
+                        generate_kwargs={
+                            "language": "vi", 
+                            "task": "transcribe",
+                            "temperature": 0.0,  # Giảm randomness để tăng độ chính xác (0 = deterministic)
+                        },
                     )
                     print("Đã tải PhoWhisper fine-tuned thành công")
                 else:
                     print("Sử dụng PhoWhisper fine-tuned model đã cache (không cần tải lại)")
                 phowhisper_pipe = _phowhisper_ft_pipe
-            else:
-                print("Sử dụng PhoWhisper Base để chuyển đổi...")
-                # Sử dụng model base đã cache hoặc load mới
+            elif use_large:
+                print("Sử dụng PhoWhisper Large để chuyển đổi...")
+                # Sử dụng model large đã cache hoặc load mới
                 if _phowhisper_base_pipe is None:
-                    print(f"Đang tải PhoWhisper base từ: {PHOWHISPER_BASE_MODEL_ID}")
+                    print(f"Đang tải PhoWhisper large từ: {PHOWHISPER_BASE_MODEL_ID}")
                     _phowhisper_base_pipe = pipeline(
                         "automatic-speech-recognition",
                         model=PHOWHISPER_BASE_MODEL_ID,
@@ -257,12 +302,37 @@ def transcribe_audio(audio_path, model_type='finetuned'):
                         # Xử lý audio dài: tự động chia nhỏ thành các đoạn <= 30s với overlap 5s
                         chunk_length_s=30,
                         stride_length_s=5,
-                        # Chỉ định ngôn ngữ tiếng Việt để cải thiện độ chính xác
-                        generate_kwargs={"language": "vi", "task": "transcribe"},
+                        # Chỉ định ngôn ngữ tiếng Việt và điều chỉnh parameters để tăng độ chính xác
+                        generate_kwargs={
+                            "language": "vi", 
+                            "task": "transcribe",
+                            "temperature": 0.0,  # Giảm randomness để tăng độ chính xác (0 = deterministic)
+                        },
                     )
-                    print("Đã tải PhoWhisper base thành công")
+                    print("Đã tải PhoWhisper large thành công")
                 else:
-                    print("Sử dụng PhoWhisper base model đã cache (không cần tải lại)")
+                    print("Sử dụng PhoWhisper large model đã cache (không cần tải lại)")
+                phowhisper_pipe = _phowhisper_base_pipe
+            else:
+                # Model type không hợp lệ, mặc định dùng large
+                print(f"Model type '{model_type}' không hợp lệ, sử dụng PhoWhisper Large mặc định...")
+                if _phowhisper_base_pipe is None:
+                    print(f"Đang tải PhoWhisper large từ: {PHOWHISPER_BASE_MODEL_ID}")
+                    _phowhisper_base_pipe = pipeline(
+                        "automatic-speech-recognition",
+                        model=PHOWHISPER_BASE_MODEL_ID,
+                        device=0 if torch.cuda.is_available() else -1,
+                        chunk_length_s=30,
+                        stride_length_s=5,
+                        generate_kwargs={
+                            "language": "vi", 
+                            "task": "transcribe",
+                            "temperature": 0.0,
+                        },
+                    )
+                    print("Đã tải PhoWhisper large thành công")
+                else:
+                    print("Sử dụng PhoWhisper large model đã cache (không cần tải lại)")
                 phowhisper_pipe = _phowhisper_base_pipe
             
             # Chuyển đổi audio thành numpy array để tránh vấn đề ffmpeg trong pipeline
@@ -317,25 +387,37 @@ def transcribe_audio(audio_path, model_type='finetuned'):
                         subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True)
                         audio = AudioSegment.from_wav(temp_wav_file)
                 
-                # Cải thiện chất lượng audio
+                # Cải thiện chất lượng audio - tối ưu cho TVC (quảng cáo)
+                print("Đang xử lý audio để tối ưu cho TVC...")
+                
                 # 1. Đảm bảo 16kHz, mono trước (quan trọng cho Whisper)
                 if audio.frame_rate != 16000:
                     audio = audio.set_frame_rate(16000)
                 if audio.channels != 1:
                     audio = audio.set_channels(1)
                 
-                # 2. High-pass filter để loại bỏ noise tần số thấp
+                # 2. Voice enhancement cho TVC: Tăng cường tần số giọng nói (300-3400Hz)
                 try:
-                    # Chỉ áp dụng nếu audio đủ dài
                     if len(audio) > 100:  # > 100ms
-                        audio = audio.high_pass_filter(80)  # Loại bỏ < 80Hz
+                        # High-pass filter mạnh hơn để loại bỏ nhạc nền tần số thấp
+                        audio = audio.high_pass_filter(200)  # Loại bỏ < 200Hz (nhạc bass)
+                        # Low-pass filter để loại bỏ noise tần số cao
+                        audio = audio.low_pass_filter(8000)  # Giữ lại < 8kHz (đủ cho giọng nói)
                 except:
                     pass  # Bỏ qua nếu không hỗ trợ
                 
-                # 3. Normalize volume (chuẩn hóa âm lượng)
+                # 3. Noise reduction (giảm nhiễu) - áp dụng compression để làm phẳng dynamic range
+                try:
+                    if len(audio) > 500:  # > 500ms
+                        # Compress audio để giảm khoảng cách giữa giọng nói và nhạc nền
+                        audio = audio.compress_dynamic_range(threshold=-20.0, ratio=4.0, attack=5.0, release=50.0)
+                except:
+                    pass  # Bỏ qua nếu không hỗ trợ
+                
+                # 4. Normalize volume (chuẩn hóa âm lượng)
                 audio = audio.normalize()
                 
-                # 4. Tăng volume nếu quá nhỏ (nhưng không quá lớn)
+                # 5. Tăng volume nếu quá nhỏ (nhưng không quá lớn)
                 if audio.max_possible_amplitude:
                     max_dBFS = audio.max_dBFS
                     if max_dBFS < -20:  # Nếu quá nhỏ
@@ -345,6 +427,8 @@ def transcribe_audio(audio_path, model_type='finetuned'):
                         audio = audio.apply_gain(gain_needed)
                     elif max_dBFS > -3:  # Nếu quá lớn, giảm xuống
                         audio = audio.apply_gain(-max_dBFS - 3)
+                
+                print(f"Đã xử lý audio: {len(audio)}ms, {audio.frame_rate}Hz, {audio.channels} channel(s)")
                 
                 # Chuyển đổi thành numpy array (float32, -1.0 đến 1.0)
                 import numpy as np
@@ -783,7 +867,7 @@ def convert_video():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 future_ft = executor.submit(run_model, 'finetuned')
-                future_base = executor.submit(run_model, 'base')
+                future_base = executor.submit(run_model, 'large')  # Dùng 'large' thay vì 'base'
                 
                 text_ft = future_ft.result()
                 text_base = future_base.result()
@@ -919,7 +1003,7 @@ def convert_video_file():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 future_ft = executor.submit(run_model, 'finetuned')
-                future_base = executor.submit(run_model, 'base')
+                future_base = executor.submit(run_model, 'large')  # Dùng 'large' thay vì 'base'
                 
                 text_ft = future_ft.result()
                 text_base = future_base.result()

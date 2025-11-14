@@ -13,26 +13,46 @@ from pathlib import Path
 
 
 def load_prompts(prompts_file):
-    """Đọc file prompts.txt và trả về dictionary {filename: text}"""
+    """
+    Đọc file transcript và trả về dictionary {filename: text}
+    Hỗ trợ 2 format:
+    1. Format mới (pipe-separated): FILENAME|TEXT|TIMESTAMPS
+    2. Format cũ (space-separated): FILENAME TEXT
+    """
     prompts = {}
     if not os.path.exists(prompts_file):
         print(f"Error: File {prompts_file} không tồn tại")
         return prompts
     
     with open(prompts_file, 'r', encoding='utf-8') as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
             
-            # Format: FILENAME TEXT
-            parts = line.split(' ', 1)
-            if len(parts) == 2:
-                filename = parts[0]
-                text = parts[1]
-                prompts[filename] = text
+            # Thử format mới trước (pipe-separated): FILENAME|TEXT|TIMESTAMPS
+            if '|' in line:
+                parts = line.split('|')
+                if len(parts) >= 2:
+                    filename = parts[0].strip()
+                    text = parts[1].strip()
+                    # Bỏ qua timestamps (parts[2]) nếu có
+                    # Lưu filename không có extension để match với audio files
+                    filename_without_ext = os.path.splitext(filename)[0]
+                    prompts[filename_without_ext] = text
+                else:
+                    print(f"Warning: Dòng {line_num} không đúng format (pipe): {line}")
             else:
-                print(f"Warning: Dòng không đúng format: {line}")
+                # Format cũ (space-separated): FILENAME TEXT
+                parts = line.split(' ', 1)
+                if len(parts) == 2:
+                    filename = parts[0]
+                    text = parts[1]
+                    # Lưu filename không có extension để match với audio files
+                    filename_without_ext = os.path.splitext(filename)[0]
+                    prompts[filename_without_ext] = text
+                else:
+                    print(f"Warning: Dòng {line_num} không đúng format: {line}")
     
     return prompts
 
@@ -284,6 +304,10 @@ def main():
                         help='Tỷ lệ dataset gốc để sử dụng (positional argument, ví dụ: 0.1 = 10%%)')
     parser.add_argument('--archive-dir', type=str, default='archive/vivos/train',
                         help='Thư mục chứa dataset (default: archive/vivos/train)')
+    parser.add_argument('--transcript-file', type=str, default=None,
+                        help='File transcript (default: tự động tìm prompts.txt hoặc transcriptAll.txt trong archive-dir)')
+    parser.add_argument('--audio-dir', type=str, default=None,
+                        help='Thư mục chứa audio files (default: tự động tìm mp3/ hoặc waves/ trong archive-dir)')
     parser.add_argument('--output-dir', type=str, default='data',
                         help='Thư mục output để lưu JSONL files (default: data)')
     parser.add_argument('--train-ratio', type=float, default=0.8,
@@ -311,17 +335,144 @@ def main():
     if dataset_ratio <= 0.0 or dataset_ratio > 1.0:
         raise ValueError(f"Dataset ratio phải trong khoảng (0.0, 1.0], nhưng được {dataset_ratio}")
     
-    # Tìm prompts.txt và waves/ trong archive_dir
+    # Tìm transcript file và waves/ trong archive_dir
     archive_dir = os.path.abspath(args.archive_dir)  # Convert to absolute path
-    prompts_file = os.path.join(archive_dir, 'prompts.txt')
-    audio_dir = os.path.join(archive_dir, 'waves')
+    
+    # Xác định file transcript
+    transcript_search_paths = []
+    archive_root = os.path.dirname(archive_dir.rstrip(os.sep))
+    archive_super_root = os.path.dirname(archive_root.rstrip(os.sep)) if archive_root else None
+
+    if args.transcript_file:
+        prompts_file = os.path.abspath(args.transcript_file)
+        transcript_search_paths.append(prompts_file)
+    else:
+        transcript_candidates = [
+            'transcriptAll.txt',
+            'transcript_all.txt',
+            'transcript.txt',
+            'prompts.txt',
+            'prompt.txt',
+            'metadata.txt',
+            'metadata.csv',
+        ]
+        found_transcript = None
+        search_dirs = []
+        for search_dir in [archive_dir, archive_root, archive_super_root]:
+            if search_dir and search_dir not in search_dirs:
+                search_dirs.append(search_dir)
+
+        # Tìm transcript trong các thư mục ưu tiên (không đệ quy)
+        for search_dir in search_dirs:
+            for candidate in transcript_candidates:
+                candidate_path = os.path.join(search_dir, candidate)
+                if candidate_path not in transcript_search_paths:
+                    transcript_search_paths.append(candidate_path)
+                if os.path.exists(candidate_path):
+                    found_transcript = candidate_path
+                    break
+            if found_transcript:
+                break
+
+        # Nếu chưa tìm thấy, duyệt toàn bộ thư mục con
+        if not found_transcript:
+            for search_dir in search_dirs:
+                for root, _, files in os.walk(search_dir):
+                    for candidate in transcript_candidates:
+                        if candidate in files:
+                            found_transcript = os.path.join(root, candidate)
+                            transcript_search_paths.append(found_transcript)
+                            break
+                    if found_transcript:
+                        break
+                if found_transcript:
+                    break
+
+        if found_transcript:
+            prompts_file = os.path.abspath(found_transcript)
+            print(f"✓ Tìm thấy file transcript: {prompts_file}")
+        else:
+            fallback_root = None
+            for root_candidate in [archive_super_root, archive_root, archive_dir]:
+                if root_candidate:
+                    fallback_root = root_candidate
+                    break
+            prompts_file = os.path.join(fallback_root, 'prompts.txt') if fallback_root else 'prompts.txt'
+            if prompts_file not in transcript_search_paths:
+                transcript_search_paths.append(prompts_file)
+    
+    # Xác định thư mục audio
+    audio_search_paths = []
+    if args.audio_dir:
+        audio_dir = os.path.abspath(args.audio_dir)
+        audio_search_paths.append(audio_dir)
+    else:
+        audio_candidates = [
+            'mp3',
+            'mp3s',
+            'wav',
+            'wavs',
+            'waves',
+            'audio',
+        ]
+        found_audio_dir = None
+        audio_search_dirs = []
+        for search_dir in [archive_dir, archive_root, archive_super_root]:
+            if search_dir and search_dir not in audio_search_dirs:
+                audio_search_dirs.append(search_dir)
+        # Ưu tiên tìm trực tiếp trong các thư mục ưu tiên
+        for search_dir in audio_search_dirs:
+            for candidate in audio_candidates:
+                candidate_path = os.path.join(search_dir, candidate)
+                if candidate_path not in audio_search_paths:
+                    audio_search_paths.append(candidate_path)
+                if os.path.isdir(candidate_path):
+                    found_audio_dir = candidate_path
+                    break
+            if found_audio_dir:
+                break
+        # Nếu chưa thấy, duyệt đệ quy
+        if not found_audio_dir:
+            for search_dir in audio_search_dirs:
+                for root, dirs, _ in os.walk(search_dir):
+                    for candidate in audio_candidates:
+                        if candidate in dirs:
+                            found_audio_dir = os.path.join(root, candidate)
+                            audio_search_paths.append(found_audio_dir)
+                            break
+                    if found_audio_dir:
+                        break
+                if found_audio_dir:
+                    break
+        if found_audio_dir:
+            audio_dir = os.path.abspath(found_audio_dir)
+            print(f"✓ Tìm thấy thư mục audio: {audio_dir}")
+        else:
+            fallback_root = None
+            for root_candidate in [archive_super_root, archive_root, archive_dir]:
+                if root_candidate:
+                    fallback_root = root_candidate
+                    break
+            audio_dir = os.path.join(fallback_root, 'mp3') if fallback_root else 'mp3'
+            if audio_dir not in audio_search_paths:
+                audio_search_paths.append(audio_dir)
     
     if not os.path.exists(prompts_file):
-        print(f"Error: File prompts.txt không tồn tại: {prompts_file}")
+        print(f"Error: File transcript không tồn tại: {prompts_file}")
+        if transcript_search_paths:
+            print("  Đã thử tìm trong:")
+            for path in transcript_search_paths:
+                print(f"    - {path}")
+        print("  Hãy chỉ định --transcript-file hoặc đảm bảo có file transcript hợp lệ trong archive-dir")
         return
     
     if not os.path.exists(audio_dir):
-        print(f"Error: Thư mục waves không tồn tại: {audio_dir}")
+        print(f"Error: Thư mục audio không tồn tại: {audio_dir}")
+        if audio_search_paths:
+            print("  Đã thử tìm trong:")
+            for path in audio_search_paths:
+                print(f"    - {path}")
+        print("  Hãy chỉ định --audio-dir hoặc đảm bảo có thư mục chứa audio trong archive-dir")
         return
     
     # Tạo output directory

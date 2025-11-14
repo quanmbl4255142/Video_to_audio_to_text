@@ -322,7 +322,7 @@
                         style="width: 100%; padding: 12px 15px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 14px; background: white; cursor: pointer; transition: all 0.3s;"
                     >
                         <option value="finetuned">PhoWhisper Fine-tuned (Tối ưu cho tiếng Việt)</option>
-                        <option value="base">PhoWhisper Base (Model gốc)</option>
+                        <option value="large">PhoWhisper Large (Model lớn - Độ chính xác cao)</option>
                         <option value="both">Cả 2 model (So sánh kết quả)</option>
                     </select>
                 </div>
@@ -355,7 +355,7 @@
                         style="width: 100%; padding: 12px 15px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 14px; background: white; cursor: pointer; transition: all 0.3s;"
                     >
                         <option value="finetuned">PhoWhisper Fine-tuned (Tối ưu cho tiếng Việt)</option>
-                        <option value="base">PhoWhisper Base (Model gốc)</option>
+                        <option value="large">PhoWhisper Large (Model lớn - Độ chính xác cao)</option>
                         <option value="both">Cả 2 model (So sánh kết quả)</option>
                     </select>
                 </div>
@@ -503,11 +503,11 @@
                             </button>
                         </div>
                         <div style="background: white; padding: 15px; border-radius: 8px; border: 2px solid #764ba2;">
-                            <h4 style="margin: 0 0 10px 0; color: #764ba2; font-size: 16px;">🔷 PhoWhisper Base</h4>
+                            <h4 style="margin: 0 0 10px 0; color: #764ba2; font-size: 16px;">🔷 PhoWhisper Large</h4>
                             <div style="max-height: 400px; overflow-y: auto; margin-bottom: 10px;">
                                 <p style="color: #333; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; font-size: 14px;">${escapeHtml(baseText)}</p>
                             </div>
-                            <button onclick="copyTextToClipboard('base')" style="width: 100%; padding: 8px; background: #764ba2; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px;">
+                            <button onclick="copyTextToClipboard('large')" style="width: 100%; padding: 8px; background: #764ba2; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px;">
                                 📋 Sao chép
                             </button>
                         </div>
@@ -558,10 +558,10 @@
             
             if (modelType === 'finetuned' && window.currentTextFinetuned) {
                 textToCopy = window.currentTextFinetuned;
-            } else if (modelType === 'base' && window.currentTextBase) {
+            } else if ((modelType === 'large' || modelType === 'base') && window.currentTextBase) {
                 textToCopy = window.currentTextBase;
             } else if (modelType === 'both' && window.currentTextFinetuned && window.currentTextBase) {
-                textToCopy = `=== PhoWhisper Fine-tuned ===\n${window.currentTextFinetuned}\n\n=== PhoWhisper Base ===\n${window.currentTextBase}`;
+                textToCopy = `=== PhoWhisper Fine-tuned ===\n${window.currentTextFinetuned}\n\n=== PhoWhisper Large ===\n${window.currentTextBase}`;
             } else if (window.currentText) {
                 textToCopy = window.currentText;
             }

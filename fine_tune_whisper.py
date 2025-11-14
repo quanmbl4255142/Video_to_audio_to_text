@@ -473,20 +473,26 @@ def save_detailed_report(results, output_dir, model_name):
 class WhisperDataCollator:
     """Custom data collator xử lý audio on-the-fly và tối ưu VRAM"""
     
-    def __init__(self, processor, tokenizer, padding=True, device="cuda", enable_cache=False):
+    def __init__(self, processor, tokenizer, padding=True, device="cuda", enable_cache=False, enable_augmentation=False):
         self.processor = processor
         self.tokenizer = tokenizer
         self.padding = padding
         self.device = device if torch.cuda.is_available() else "cpu"
         # Tắt cache để tiết kiệm VRAM (cache audio tốn nhiều RAM)
         self.enable_cache = enable_cache
+        self.enable_augmentation = enable_augmentation  # Bật data augmentation khi training
         self._audio_cache = {} if enable_cache else {}  # Cache chỉ dùng khi enable_cache=True
         self._cache_size_limit = 0  # Tắt cache để tiết kiệm VRAM
     
-    def _load_audio(self, audio_path, max_duration=30.0):
+    def _load_audio(self, audio_path, max_duration=30.0, enable_augmentation=False):
         """
         Load audio từ file với error handling - tối ưu RAM
         Chỉ load tối đa max_duration giây (mặc định 30s = 3000 frames mel spectrogram)
+        
+        Args:
+            audio_path: Đường dẫn đến file audio
+            max_duration: Độ dài tối đa (giây)
+            enable_augmentation: Bật data augmentation (chỉ dùng khi training)
         """
         # Tắt cache để tiết kiệm VRAM
         if self.enable_cache and audio_path in self._audio_cache:
@@ -495,6 +501,7 @@ class WhisperDataCollator:
         try:
             # Sử dụng librosa để load audio
             import librosa
+            import random
             # Load với resampling trực tiếp và giới hạn độ dài để tiết kiệm memory
             # max_duration=30s vì Whisper chỉ cần 3000 frames (30s * 100 frames/s)
             audio, sr = librosa.load(
@@ -509,6 +516,37 @@ class WhisperDataCollator:
             max_samples = int(max_duration * sr)
             if len(audio) > max_samples:
                 audio = audio[:max_samples]
+            
+            # Data augmentation (chỉ khi training)
+            if enable_augmentation:
+                # 1. Volume adjustment (thay đổi âm lượng)
+                if random.random() < 0.3:
+                    volume_factor = random.uniform(0.8, 1.2)
+                    audio = audio * volume_factor
+                
+                # 2. Add noise (thêm nhiễu nhẹ)
+                if random.random() < 0.2:
+                    noise_level = random.uniform(0.005, 0.015)
+                    noise = np.random.normal(0, noise_level, len(audio)).astype(np.float32)
+                    audio = audio + noise
+                    # Clamp để tránh clipping
+                    audio = np.clip(audio, -1.0, 1.0)
+                
+                # 3. Time stretching (thay đổi tốc độ nói) - chỉ áp dụng nhẹ
+                if random.random() < 0.2:
+                    try:
+                        import librosa.effects as effects
+                        stretch_factor = random.uniform(0.95, 1.05)  # Thay đổi nhẹ ±5%
+                        audio = effects.time_stretch(audio, rate=stretch_factor)
+                        # Đảm bảo độ dài không đổi
+                        if len(audio) > max_samples:
+                            audio = audio[:max_samples]
+                        elif len(audio) < max_samples:
+                            # Pad với zeros nếu ngắn hơn
+                            padding = np.zeros(max_samples - len(audio), dtype=np.float32)
+                            audio = np.concatenate([audio, padding])
+                    except Exception:
+                        pass  # Bỏ qua nếu không thể time stretch
             
             # Không cache để tiết kiệm VRAM
             return audio, sr
@@ -537,8 +575,8 @@ class WhisperDataCollator:
         
         for idx, audio_path in enumerate(audio_paths):
             try:
-                # Load audio
-                audio_array, sr = self._load_audio(audio_path)
+                # Load audio với augmentation nếu được bật
+                audio_array, sr = self._load_audio(audio_path, enable_augmentation=self.enable_augmentation)
                 
                 # Extract features ngay lập tức
                 features = self.processor.feature_extractor(
@@ -634,12 +672,12 @@ def main():
                         help='PhoWhisper model name (default: vinai/PhoWhisper-base). Có thể dùng: vinai/PhoWhisper-base, vinai/PhoWhisper-large')
     parser.add_argument('--train-jsonl', type=str, default='data/train.jsonl',
                         help='File JSONL training data (default: data/train.jsonl)')
-    parser.add_argument('--audio-dir', type=str, default='archive/vivos/train/waves',
-                        help='Thư mục chứa audio files (default: archive/vivos/train/waves)')
+    parser.add_argument('--audio-dir', type=str, default='archive/mp3',
+                        help='Thư mục chứa audio files (default: archive/mp3)')
     parser.add_argument('--output-dir', type=str, default='./phowhisper-finetuned',
                         help='Thư mục lưu model sau khi fine-tune (default: ./phowhisper-finetuned)')
-    parser.add_argument('--num-epochs', type=int, default=3,
-                        help='Số epochs (default: 3)')
+    parser.add_argument('--num-epochs', type=int, default=5,
+                        help='Số epochs (default: 5, khuyến nghị 5-10)')
     parser.add_argument('--batch-size', type=int, default=4,
                         help='Batch size (default: 4, phù hợp GPU 8GB)')
     parser.add_argument('--learning-rate', type=float, default=1e-5,
@@ -668,18 +706,24 @@ def main():
                         help='Đánh giá thêm sau khi train trên JSONL khác (ví dụ: data/test.jsonl). Bỏ trống để bỏ qua')
     parser.add_argument('--num-beams', type=int, default=2,
                         help='Beam size khi generate (mặc định 2)')
-    parser.add_argument('--label-smoothing', type=float, default=0.1,
-                        help='Label smoothing factor (mặc định 0.1)')
-    parser.add_argument('--chunk-size', type=int, default=1000,
-                        help='Số mẫu mỗi lần train theo từng đợt (mặc định: 1000, 0 = tắt chunked training)')
-    parser.add_argument('--start-chunk', type=int, default=0,
-                        help='Bắt đầu từ chunk index nào (mặc định 0)')
-    parser.add_argument('--no-eval', action='store_true', default=True,
-                        help='Tắt evaluation trong và sau khi training (MẶC ĐỊNH BẬT)')
-    parser.add_argument('--eval', dest='no_eval', action='store_false',
-                        help='Bật evaluation (tắt --no-eval)')
+    parser.add_argument('--label-smoothing', type=float, default=0.05,
+                        help='Label smoothing factor (mặc định 0.05, khuyến nghị 0.0-0.05 cho ASR)')
+    parser.add_argument('--no-eval', action='store_true', default=False,
+                        help='Tắt evaluation trong và sau khi training')
+    parser.add_argument('--eval', dest='no_eval', action='store_false', default=True,
+                        help='Bật evaluation (MẶC ĐỊNH BẬT - khuyến nghị)')
     parser.add_argument('--use-negative-samples', action='store_true',
                         help='Train cả negative samples (is_match=False). Mặc định chỉ train positive samples')
+    parser.add_argument('--enable-augmentation', action='store_true',
+                        help='Bật data augmentation (volume adjustment, noise, time stretching). Mặc định tắt để đảm bảo reproducibility')
+    parser.add_argument('--dataloader-workers', type=int, default=None,
+                        help='Số workers cho dataloader (default: tự động, 0 khi không có GPU, 4 khi có GPU và không max-speed, 8 khi max-speed)')
+    parser.add_argument('--torch-compile', action='store_true',
+                        help='Sử dụng torch.compile() để tăng tốc training (PyTorch 2.0+, có thể tăng tốc 20-30%%)')
+    parser.add_argument('--eval-steps', type=int, default=None,
+                        help='Số steps giữa mỗi lần evaluation (default: 500, tăng lên để đánh giá ít hơn và train nhanh hơn)')
+    parser.add_argument('--save-steps', type=int, default=None,
+                        help='Số steps giữa mỗi lần save checkpoint (default: 500, tăng lên để save ít hơn và train nhanh hơn)')
     
     args = parser.parse_args()
     
@@ -703,6 +747,15 @@ def main():
         # Mặc định tắt auto batch size để tránh thử batch quá lớn
         args.auto_batch_size = False
     
+    # Xác định số workers cho dataloader
+    if args.dataloader_workers is None:
+        if torch.cuda.is_available():
+            # Mặc định dùng 4 workers khi có GPU (không phải max-speed), 8 khi max-speed
+            args.dataloader_workers = 8 if args.max_speed else 4
+        else:
+            # Không dùng workers khi chạy trên CPU (có thể chậm hơn)
+            args.dataloader_workers = 0
+    
     # Validate model name - chỉ cho phép PhoWhisper models
     valid_phowhisper_models = ['vinai/PhoWhisper-base', 'vinai/PhoWhisper-large']
     if args.model_name not in valid_phowhisper_models:
@@ -720,6 +773,25 @@ def main():
     
     # Convert to absolute paths
     args.train_jsonl = os.path.abspath(args.train_jsonl)
+    
+    # Xác định audio_dir - tự động tìm nếu không tồn tại
+    audio_dir_abs = os.path.abspath(args.audio_dir)
+    if not os.path.exists(audio_dir_abs):
+        # Thử tìm mp3/ hoặc waves/ trong archive/
+        archive_dir = os.path.dirname(audio_dir_abs) if os.path.dirname(audio_dir_abs) else 'archive'
+        audio_dir_mp3 = os.path.join(archive_dir, 'mp3')
+        audio_dir_waves = os.path.join(archive_dir, 'waves')
+        
+        if os.path.exists(audio_dir_mp3):
+            args.audio_dir = audio_dir_mp3
+            print(f"⚠ Không tìm thấy {audio_dir_abs}, tự động tìm thấy mp3/ tại: {args.audio_dir}")
+        elif os.path.exists(audio_dir_waves):
+            args.audio_dir = audio_dir_waves
+            print(f"⚠ Không tìm thấy {audio_dir_abs}, tự động tìm thấy waves/ tại: {args.audio_dir}")
+        else:
+            # Giữ nguyên để hiển thị error message rõ ràng
+            args.audio_dir = audio_dir_abs
+    
     args.audio_dir = os.path.abspath(args.audio_dir)
     
     if args.eval_jsonl and args.eval_jsonl.lower() != 'none':
@@ -901,10 +973,19 @@ def main():
     print(f"Effective Batch Size: {args.batch_size * args.gradient_accumulation_steps}")
     print(f"Learning Rate: {args.learning_rate}")
     print(f"FP16 (Mixed Precision): {args.fp16 and torch.cuda.is_available()}")
+    print(f"Dataloader Workers: {args.dataloader_workers}")
+    print(f"Dataloader Pin Memory: {torch.cuda.is_available()}")
+    print(f"Dataloader Prefetch: {4 if torch.cuda.is_available() else 'None'}")
+    if args.torch_compile:
+        print(f"🔧 Torch Compile: BẬT (có thể tăng tốc 20-30%%)")
     if args.max_speed:
         print(f"🚀 MAX SPEED Mode: BẬT")
     if args.auto_batch_size:
         print(f"🔍 Auto Batch Size: BẬT")
+    if args.eval_steps:
+        print(f"📊 Eval Steps: {args.eval_steps} (tăng để train nhanh hơn)")
+    if args.save_steps:
+        print(f"💾 Save Steps: {args.save_steps} (tăng để train nhanh hơn)")
     print(f"GPU: {device}")
     print(f"========================\n")
     
@@ -917,6 +998,20 @@ def main():
     
     # Set language và task tokens
     model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(language="vi", task="transcribe")
+    
+    # Áp dụng torch.compile() để tăng tốc training (PyTorch 2.0+)
+    if args.torch_compile and hasattr(torch, 'compile'):
+        try:
+            print("🔧 Đang compile model với torch.compile() để tăng tốc...")
+            # Mode "reduce-overhead" tối ưu cho training
+            model = torch.compile(model, mode="reduce-overhead")
+            print("✅ Đã compile model thành công - có thể tăng tốc 20-30%")
+        except Exception as e:
+            print(f"⚠️  Không thể compile model: {e}")
+            print("   → Tiếp tục training không compile (có thể chậm hơn)")
+    elif args.torch_compile:
+        print("⚠️  torch.compile() không khả dụng (cần PyTorch 2.0+)")
+        print("   → Tiếp tục training không compile")
     
     if torch.cuda.is_available():
         print(f"Model sẽ được tự động chuyển lên GPU khi training bắt đầu")
@@ -952,13 +1047,13 @@ def main():
         gradient_checkpointing=True,  # Tiết kiệm VRAM
         fp16=args.fp16 and torch.cuda.is_available(),  # Chỉ dùng FP16 nếu có GPU
         bf16=False,  # Có thể dùng bf16 nếu GPU hỗ trợ (A100, H100)
-        # Dataloader settings: tối ưu cho tốc độ nếu max-speed, ngược lại tối ưu VRAM
-        dataloader_num_workers=2 if (args.max_speed and torch.cuda.is_available()) else 0,
-        dataloader_pin_memory=True if (args.max_speed and torch.cuda.is_available()) else False,
-        dataloader_prefetch_factor=2 if (args.max_speed and torch.cuda.is_available()) else None,
+        # Dataloader settings: tối ưu cho tốc độ - luôn bật pin_memory và prefetch khi có GPU
+        dataloader_num_workers=args.dataloader_workers,
+        dataloader_pin_memory=torch.cuda.is_available(),  # Luôn bật khi có GPU để tăng tốc
+        dataloader_prefetch_factor=4 if torch.cuda.is_available() else None,  # Tăng prefetch để tăng tốc
         eval_strategy="no" if args.no_eval else ("steps" if eval_dataset else "no"),
-        eval_steps=None if args.no_eval else (500 if eval_dataset else None),
-        save_steps=500,
+        eval_steps=None if args.no_eval else (args.eval_steps if args.eval_steps else (500 if eval_dataset else None)),
+        save_steps=args.save_steps if args.save_steps else 500,
         logging_steps=100,
         report_to="none",
         load_best_model_at_end=True if eval_dataset else False,
@@ -996,14 +1091,15 @@ def main():
         tokenizer=processor.tokenizer,
         padding=True,
         device=device_for_collator,
-        enable_cache=False  # Tắt cache để tiết kiệm VRAM
+        enable_cache=False,  # Tắt cache để tiết kiệm VRAM
+        enable_augmentation=args.enable_augmentation  # Bật augmentation nếu được yêu cầu
     )
     
     # Trainer với tối ưu memory
     trainer = Seq2SeqTrainer(
         args=training_args,
         model=model,
-        train_dataset=None,  # sẽ gán sau (hỗ trợ train theo từng chunk)
+        train_dataset=None,  # sẽ gán sau khi đã load đầy đủ dataset
         eval_dataset=eval_dataset,
         tokenizer=processor.feature_extractor,
         data_collator=data_collator,
@@ -1022,7 +1118,7 @@ def main():
     
     # Train với callback để clear cache định kỳ
     # ClearCacheCallback đã được định nghĩa ở module level để tránh lỗi pickle
-    # Train (hỗ trợ train theo từng đợt/chunk)
+    # Train trên toàn bộ dataset
     print("Bắt đầu training...")
     print("Lưu ý: Audio được load on-the-fly để tiết kiệm RAM, sử dụng VRAM của GPU")
     print("\n💡 Tối ưu RAM đã được áp dụng:")
@@ -1038,85 +1134,63 @@ def main():
         print(f"   - Batch size: {args.batch_size}")
         print(f"   - FP16: {'BẬT' if args.fp16 else 'TẮT'}")
         print(f"   - Effective batch size: {args.batch_size * args.gradient_accumulation_steps}")
-        print(f"   - Dataloader workers: 2 (tăng tốc)")
+        print(f"   - Dataloader workers: {args.dataloader_workers} (tăng tốc)")
+        if args.torch_compile:
+            print(f"   - Torch Compile: BẬT (tăng tốc ~20-30%)")
     else:
-        print("⚠ Tối ưu VRAM: batch_size=8, gradient_accumulation=4, cache tắt, workers=0")
-        print("⚠ Nếu muốn tăng tốc độ, thử:")
-        print("   1. Dùng --max-speed để tự động tối ưu")
-        print("   2. Dùng --auto-batch-size để tự động tìm batch size tối ưu")
-        print("   3. Bật --fp16 để tăng tốc")
+        print("⚡ Các tối ưu đã được áp dụng:")
+        print(f"   - Dataloader workers: {args.dataloader_workers} (load data song song)")
+        print(f"   - Pin memory: {'BẬT' if torch.cuda.is_available() else 'TẮT'} (tăng tốc GPU)")
+        print(f"   - Prefetch factor: {4 if torch.cuda.is_available() else 'None'} (load data trước)")
+        if args.torch_compile:
+            print(f"   - Torch Compile: BẬT (tăng tốc ~20-30%)")
+        print("💡 Để tăng tốc độ thêm, thử:")
+        print("   1. Dùng --torch-compile để compile model (tăng tốc 20-30%)")
+        print("   2. Dùng --max-speed để tự động tối ưu tối đa")
+        print("   3. Dùng --auto-batch-size để tự động tìm batch size tối ưu")
+        print("   4. Tăng --eval-steps (ví dụ: 1000) để đánh giá ít hơn")
+        print("   5. Tăng --save-steps (ví dụ: 1000) để save ít hơn")
+        print("   6. Tăng --dataloader-workers lên 8 hoặc 16 nếu có nhiều CPU cores")
         print("⚠ Nếu vẫn hết VRAM, thử:")
         print("   1. Giảm batch_size xuống 4 hoặc 2: --batch-size 4")
         print("   2. Tăng gradient_accumulation_steps: --gradient-accumulation-steps 8")
-        print("   3. Set environment variable: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
+        print("   3. Giảm dataloader workers: --dataloader-workers 2")
+        print("   4. Set environment variable: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
 
     # Thêm callback để clear cache mỗi 50 steps
     trainer.add_callback(ClearCacheCallback(clear_interval=50))
 
-    # Xử lý train theo chunk nếu được yêu cầu
-    if args.chunk_size and args.chunk_size > 0:
-        total_samples = len(train_dataset)
-        num_chunks = (total_samples + args.chunk_size - 1) // args.chunk_size
-        start_chunk = max(0, min(args.start_chunk, num_chunks - 1))
-
-        print(f"\n=== Train theo từng đợt (Chunked Training) ===")
-        print(f"Tổng samples: {total_samples}")
-        print(f"Chunk size: {args.chunk_size} samples/chunk")
-        print(f"Tổng số chunk: {num_chunks}")
-        print(f"Bắt đầu từ chunk: {start_chunk}")
-        if args.no_eval:
-            print(f"⚠️  Evaluation đã tắt - Train liên tục qua các chunks, không test")
-        print(f"→ Sẽ train liên tục từ chunk {start_chunk} đến chunk {num_chunks - 1}")
-
-        from pathlib import Path as _Path
-        checkpoints_root = _Path(args.output_dir) / "chunk_checkpoints"
-        checkpoints_root.mkdir(parents=True, exist_ok=True)
-
-        # Train lần lượt từng chunk
-        for chunk_idx in range(start_chunk, num_chunks):
-            start_idx = chunk_idx * args.chunk_size
-            end_idx = min(start_idx + args.chunk_size, total_samples)
-            indices = list(range(start_idx, end_idx))
-            chunk_dataset = train_dataset.select(indices)
-
-            print(f"\n--- Chunk {chunk_idx + 1}/{num_chunks}: samples [{start_idx}:{end_idx}) ---")
-            trainer.train_dataset = chunk_dataset
-
-            # Không resume Trainer state giữa các chunk (tránh trạng thái "đã hoàn tất")
-            # Model weights đã được cập nhật sau mỗi chunk nên tiếp tục train trực tiếp
-            trainer.train(resume_from_checkpoint=False)
-
-            # Lưu checkpoint theo chunk để an toàn
-            chunk_ckpt_dir = checkpoints_root / f"chunk_{chunk_idx:04d}"
-            chunk_ckpt_dir.mkdir(parents=True, exist_ok=True)
-            print(f"Lưu checkpoint chunk vào: {str(chunk_ckpt_dir)}")
-            trainer.save_model(str(chunk_ckpt_dir))
-            trainer.save_state()
-            # Lưu processor (tokenizer/feature extractor) một lần ở output_dir chính
-            try:
-                processor.save_pretrained(args.output_dir)
-            except Exception:
-                pass
-
-            # Clear cache giữa các chunk
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            import gc as _gc
-            _gc.collect()
-
-        print("\nĐã hoàn tất train theo từng đợt.")
-    else:
-        # Train thông thường trên toàn bộ dataset (chỉ khi chunk_size = 0)
-        trainer.train_dataset = train_dataset
-        trainer.train()
+    # Train trên toàn bộ dataset
+    trainer.train_dataset = train_dataset
+    trainer.train()
     
     # Save model
     print(f"Đang lưu model vào: {args.output_dir}")
     trainer.save_model()
+    trainer.save_state()
     processor.save_pretrained(args.output_dir)
     
     # Đánh giá sau khi train và lưu báo cáo (chỉ nếu không tắt evaluation)
     if not args.no_eval:
+        # Load lại model vừa lưu để đảm bảo đánh giá sử dụng checkpoint đã được ghi ra đĩa
+        try:
+            evaluation_model = WhisperForConditionalGeneration.from_pretrained(args.output_dir)
+            evaluation_model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(language="vi", task="transcribe")
+            print("✅ Đã load lại model từ checkpoint đã lưu để đánh giá")
+        except Exception as e:
+            print(f"⚠️  Không thể load lại model từ checkpoint: {e}")
+            print("   → Sử dụng trực tiếp model trong bộ nhớ để đánh giá")
+            evaluation_model = trainer.model
+        
+        eval_trainer = Seq2SeqTrainer(
+            args=training_args,
+            model=evaluation_model,
+            train_dataset=None,
+            eval_dataset=eval_dataset,
+            tokenizer=processor.feature_extractor,
+            data_collator=data_collator,
+            compute_metrics=lambda pred: compute_metrics(pred, processor) if eval_dataset else None,
+        )
         print("\n" + "="*70)
         print("📊 BẮT ĐẦU ĐÁNH GIÁ MÔ HÌNH")
         print("="*70 + "\n")
@@ -1125,7 +1199,7 @@ def main():
         if eval_dataset:
             try:
                 print("Đang đánh giá trên validation set...")
-                eval_metrics = trainer.evaluate()
+                eval_metrics = eval_trainer.evaluate()
                 results["eval_during_training"] = eval_metrics
                 print("✅ Hoàn thành đánh giá validation set")
             except Exception as e:
@@ -1138,10 +1212,10 @@ def main():
                 if os.path.exists(extra_path):
                     print(f"\nĐang đánh giá bổ sung trên: {os.path.basename(extra_path)}")
                     extra_dataset = load_jsonl_dataset(extra_path, args.audio_dir, use_negative_samples=False)
-                    # Tạo một Trainer tạm để predict trên extra dataset
+                    # Tạo một Trainer tạm để predict trên extra dataset bằng model đã lưu
                     extra_trainer = Seq2SeqTrainer(
                         args=training_args,
-                        model=trainer.model,
+                        model=evaluation_model,
                         eval_dataset=extra_dataset,
                         tokenizer=processor.feature_extractor,
                         data_collator=data_collator,
